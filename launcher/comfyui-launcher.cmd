@@ -47,6 +47,8 @@ set "LOGFILE=%COMFYUI_APP%\comfyui_launcher.log"
 set "ERRFILE=%COMFYUI_APP%\comfyui_launcher.err"
 set "SENTINEL=%VENV_DIR%\.deps-ready"
 set "AMD_INDEX=https://repo.amd.com/rocm/whl-multi-arch/"
+if not defined TORCH_CUDA_VER set "TORCH_CUDA_VER=cu126"
+set "CUDA_INDEX=https://download.pytorch.org/whl/%TORCH_CUDA_VER%"
 
 :: --- arg parsing ---
 set "CMD=start"
@@ -284,27 +286,45 @@ if not exist "%REQUIREMENTS%" (
     exit /b 1
 )
 
-:: AMD ROCm torch stack
-set "ISAMD=0"
-if exist "%AMD_VENV%\Scripts\python.exe" set "ISAMD=1"
-set "TORCH_HIP=0"
-"%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.hip else 1)" >nul 2>&1
+:: detect backend: rocm | cuda | cpu (torch's own report wins if installed)
+set "BACKEND=cpu"
+if exist "%AMD_VENV%\Scripts\python.exe" set "BACKEND=rocm"
+nvidia-smi >nul 2>&1
+if not errorlevel 1 set "BACKEND=cuda"
+"%PY_BIN%" -c "import torch" >nul 2>&1
 if not errorlevel 1 (
-    set "TORCH_HIP=1"
-    set "ISAMD=1"
+    "%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.hip else 1)" >nul 2>&1
+    if not errorlevel 1 set "BACKEND=rocm"
+    "%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.cuda else 1)" >nul 2>&1
+    if not errorlevel 1 set "BACKEND=cuda"
 )
 
-if "!ISAMD!"=="1" (
-    if "!TORCH_HIP!"=="1" (
-        echo ROCm torch already installed - skipping torch stack.
-    ) else (
-        echo Installing torch stack from AMD ROCm index ...
+:: torch stack: only ROCm and Windows-CUDA need a special index
+if "!BACKEND!"=="rocm" (
+    "%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.hip else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo Installing ROCm torch stack ...
         "%PY_BIN%" -m pip install --index-url "%AMD_INDEX%" torch torchvision torchaudio
         if errorlevel 1 (
             echo [FATAL] Failed to install ROCm torch stack.
             pause
             exit /b 1
         )
+    ) else (
+        echo ROCm torch already installed - skipping torch stack.
+    )
+) else if "!BACKEND!"=="cuda" (
+    "%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.cuda else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo Installing CUDA torch stack ^(index %TORCH_CUDA_VER%^) ...
+        "%PY_BIN%" -m pip install --index-url "%CUDA_INDEX%" torch torchvision torchaudio
+        if errorlevel 1 (
+            echo [FATAL] Failed to install CUDA torch stack.
+            pause
+            exit /b 1
+        )
+    ) else (
+        echo CUDA torch already installed - skipping torch stack.
     )
 )
 

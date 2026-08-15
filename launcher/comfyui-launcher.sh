@@ -43,7 +43,23 @@ warn() { printf '[WARN] %s\n' "$*"; }
 die()  { printf '[FATAL] %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+Usage: comfyui-launcher.sh [command] [options]
+
+Commands:
+  start     bootstrap + launch + open browser (default)
+  install   bootstrap venv + deps only, do NOT launch
+  stop      stop a running ComfyUI instance
+  status    print whether ComfyUI is running
+
+Options (with start):
+  --no-browser   launch without opening the browser
+
+Env overrides:
+  COMFYUI_ROOT   folder containing main.py (default: this script's parent)
+  COMFYUI_VENV   venv path (default: $COMFYUI_ROOT/venv)
+  COMFYUI_PORT   port (default: 8188)
+EOF
 }
 
 # ---- is this an AMD ROCm machine? ----
@@ -84,6 +100,9 @@ ensure_python() {
 ensure_deps() {
   [[ -f "${REQUIREMENTS}" ]] || die "requirements.txt not found at ${REQUIREMENTS}"
 
+  # Torch install policy: only ROCm needs a special index here.
+  # CUDA (Linux), MPS (macOS) and CPU are all served by the default PyPI
+  # wheels, which `pip install -r requirements.txt` picks up automatically.
   if is_rocm; then
     if "${PYTHON_BIN}" -c "import torch; exit(0 if torch.version.hip else 1)" >/dev/null 2>&1; then
       log "ROCm torch already installed - skipping torch stack."
