@@ -25,7 +25,7 @@ setlocal enabledelayedexpansion
 ::   COMFYUI_PORT   port (default: 8188)
 :: ============================================================
 
-set "PORT=8188"
+if defined COMFYUI_PORT (set "PORT=%COMFYUI_PORT%") else (set "PORT=8188")
 set "URL=http://127.0.0.1:%PORT%"
 
 :: --- paths ---
@@ -111,7 +111,7 @@ del "%ERRFILE%" >nul 2>&1
 set "PIDFILE=%VENV_DIR%\.launchpid"
 del "%PIDFILE%" >nul 2>&1
 
-powershell -NoProfile -Command "(Start-Process -FilePath '%RUN_PY%' -ArgumentList 'main.py' -WorkingDirectory '%COMFYUI_APP%' -WindowStyle Hidden -PassThru -RedirectStandardOutput '%LOGFILE%' -RedirectStandardError '%ERRFILE%').Id | Set-Content -Encoding Ascii -Path '%PIDFILE%'"
+powershell -NoProfile -Command "(Start-Process -FilePath '%RUN_PY%' -ArgumentList 'main.py','--port','%PORT%' -WorkingDirectory '%COMFYUI_APP%' -WindowStyle Hidden -PassThru -RedirectStandardOutput '%LOGFILE%' -RedirectStandardError '%ERRFILE%').Id | Set-Content -Encoding Ascii -Path '%PIDFILE%'"
 
 set "NEWPID="
 if exist "%PIDFILE%" set /p NEWPID=<"%PIDFILE%"
@@ -249,8 +249,16 @@ if exist "%PY_BIN%" (
         echo Using venv python: %PY_BIN%
         exit /b 0
     )
-    echo [WARN] venv broken ^(pip missing^) - recreating...
-    rmdir /s /q "%VENV_DIR%" >nul 2>&1
+    echo [WARN] venv at %VENV_DIR% has no working pip - trying to repair...
+    "%PY_BIN%" -m ensurepip --upgrade >nul 2>&1
+    if not errorlevel 1 (
+        echo Repaired pip via ensurepip.
+        exit /b 0
+    )
+    echo [FATAL] Could not repair pip. Remove or recreate the venv manually:
+    echo   rmdir /s /q "%VENV_DIR%"   ^(then re-run this script^)
+    pause
+    exit /b 1
 )
 echo No venv found - creating one...
 set "SYSPY="
@@ -286,17 +294,20 @@ if not exist "%REQUIREMENTS%" (
     exit /b 1
 )
 
-:: detect backend: rocm | cuda | cpu (torch's own report wins if installed)
+:: detect backend: torch's own report wins, else environment markers
 set "BACKEND=cpu"
-if exist "%AMD_VENV%\Scripts\python.exe" set "BACKEND=rocm"
-nvidia-smi >nul 2>&1
-if not errorlevel 1 set "BACKEND=cuda"
 "%PY_BIN%" -c "import torch" >nul 2>&1
 if not errorlevel 1 (
     "%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.hip else 1)" >nul 2>&1
     if not errorlevel 1 set "BACKEND=rocm"
     "%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.cuda else 1)" >nul 2>&1
     if not errorlevel 1 set "BACKEND=cuda"
+) else (
+    if exist "%AMD_VENV%\Scripts\python.exe" set "BACKEND=rocm"
+    if "!BACKEND!"=="cpu" (
+        nvidia-smi >nul 2>&1
+        if not errorlevel 1 set "BACKEND=cuda"
+    )
 )
 
 :: torch stack: only ROCm and Windows-CUDA need a special index

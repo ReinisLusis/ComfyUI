@@ -80,8 +80,12 @@ ensure_python() {
       log "Using venv python: ${PYTHON_BIN}"
       return 0
     fi
-    warn "venv at ${VENV_DIR} is broken (pip missing) - recreating..."
-    rm -rf "${VENV_DIR}"
+    warn "venv at ${VENV_DIR} has no working pip - trying to repair..."
+    if "${PYTHON_BIN}" -m ensurepip --upgrade >/dev/null 2>&1; then
+      log "Repaired pip via ensurepip."
+      return 0
+    fi
+    die "Could not repair pip in ${VENV_DIR}. Remove or recreate it manually (never done automatically)."
   fi
   local sys
   sys="$(command -v python3 || command -v python || true)"
@@ -242,7 +246,7 @@ ensure_deps
 log "Launching ComfyUI in background..."
 : > "${LOGFILE}"
 : > "${ERRFILE}"
-( cd "${COMFYUI_ROOT}" && exec nohup "${PYTHON_BIN}" main.py >"${LOGFILE}" 2>"${ERRFILE}" < /dev/null ) &
+( cd "${COMFYUI_ROOT}" && exec nohup "${PYTHON_BIN}" main.py --port "${PORT}" >"${LOGFILE}" 2>"${ERRFILE}" < /dev/null ) &
 NEW_PID=$!
 log "Started with PID ${NEW_PID} (only used to monitor THIS startup)."
 
