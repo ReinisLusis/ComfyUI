@@ -1,3 +1,7 @@
 /web/assets/** linguist-generated
 /web/** linguist-vendored
 comfy_api_nodes/apis/__init__.py linguist-generated
+
+# Cross-platform launcher scripts must keep correct line endings
+launcher/*.sh text eol=lf
+launcher/*.cmd text eol=crlf
