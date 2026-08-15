@@ -2,116 +2,114 @@
 setlocal enabledelayedexpansion
 
 :: ============================================================
-:: ComfyUI Launcher / Stopper
-:: No PID file. Source of truth = whatever is actually listening
-:: on port 8188 right now, identity-verified via its command line.
+:: ComfyUI Launcher / Stopper  (Windows)
+::
+:: Bootstraps and launches a ComfyUI install:
+::   1. find or create the Python venv (AMD AI Bundle venv is reused)
+::   2. install requirements (AMD ROCm torch handled specially)
+::   3. launch main.py in the background, wait until healthy, open browser
+::
+:: No PID file. Source of truth = whatever is listening on :8188,
+:: identity-verified via its command line.
 ::
 :: Usage:
-::   comfyui-launcher.cmd          -> start (or reuse) ComfyUI, open browser
-::   comfyui-launcher.cmd stop     -> stop a running ComfyUI instance
+::   comfyui-launcher.cmd              -> start (or reuse) ComfyUI
+::   comfyui-launcher.cmd install      -> bootstrap venv + deps only (no launch)
+::   comfyui-launcher.cmd stop         -> stop a running ComfyUI instance
+::   comfyui-launcher.cmd status       -> print whether ComfyUI is running
+::   comfyui-launcher.cmd --no-browser -> start without opening the browser
+::
+:: Env overrides:
+::   COMFYUI_APP    folder containing main.py (default: AMD AI Bundle)
+::   COMFYUI_VENV   venv path (default: AMD bundle venv, else COMFYUI_APP\venv)
+::   COMFYUI_PORT   port (default: 8188)
 :: ============================================================
 
-set "COMFY_ROOT=%LOCALAPPDATA%\AMD\AI_Bundle\ComfyUI"
-set "VENV_DIR=%COMFY_ROOT%\venv"
-set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-set "VENV_PYW=%VENV_DIR%\Scripts\pythonw.exe"
-set "COMFY_APP=%COMFY_ROOT%\ComfyUI"
-set "LOGFILE=%COMFY_ROOT%\comfyui_log.txt"
-set "ERRFILE=%COMFY_ROOT%\comfyui_err.txt"
-set "URL=http://127.0.0.1:8188"
+set "PORT=8188"
+set "URL=http://127.0.0.1:%PORT%"
 
-if /I "%~1"=="stop" goto :STOP
+:: --- paths ---
+if not defined COMFYUI_APP set "COMFYUI_APP=%LOCALAPPDATA%\AMD\AI_Bundle\ComfyUI\ComfyUI"
+set "AMD_VENV=%LOCALAPPDATA%\AMD\AI_Bundle\ComfyUI\venv"
 
+if defined COMFYUI_VENV (
+    set "VENV_DIR=%COMFYUI_VENV%"
+) else if exist "%AMD_VENV%\Scripts\python.exe" (
+    set "VENV_DIR=%AMD_VENV%"
+) else (
+    set "VENV_DIR=%COMFYUI_APP%\venv"
+)
+
+set "PY_BIN=%VENV_DIR%\Scripts\python.exe"
+set "PYW_BIN=%VENV_DIR%\Scripts\pythonw.exe"
+set "REQUIREMENTS=%COMFYUI_APP%\requirements.txt"
+set "LOGFILE=%COMFYUI_APP%\comfyui_launcher.log"
+set "ERRFILE=%COMFYUI_APP%\comfyui_launcher.err"
+set "SENTINEL=%VENV_DIR%\.deps-ready"
+set "AMD_INDEX=https://repo.amd.com/rocm/whl-multi-arch/"
+
+:: --- arg parsing ---
+set "CMD=start"
+set "NO_BROWSER=0"
+if /I "%~1"=="stop"         set "CMD=stop"
+if /I "%~1"=="install"      set "CMD=install"
+if /I "%~1"=="setup"        set "CMD=install"
+if /I "%~1"=="status"       set "CMD=status"
+if /I "%~1"=="start"        set "CMD=start"
+if /I "%~1"=="--no-browser" set "NO_BROWSER=1"
+if /I "%~2"=="--no-browser" set "NO_BROWSER=1"
+if /I "%~1"=="help"   goto :USAGE
+if /I "%~1"=="-h"     goto :USAGE
+if /I "%~1"=="--help" goto :USAGE
+
+if "!CMD!"=="status"  goto :STATUS
+if "!CMD!"=="stop"    goto :STOP
+if "!CMD!"=="install" goto :INSTALL
+
+:: ============================================================
+:: START (or reuse)
+:: ============================================================
 echo ============================================
 echo  ComfyUI Launcher
 echo ============================================
 
-:: --- Is something already listening on 8188? Verify it's really ComfyUI before reusing it ---
 call :FIND_PORT_OWNER LIVE_PID
 if defined LIVE_PID (
     call :VERIFY_IS_COMFYUI "!LIVE_PID!" VERIFIED
     if "!VERIFIED!"=="1" (
-        echo ComfyUI is already running ^(PID !LIVE_PID!, verified^). Opening browser...
-        start "" "%URL%"
+        echo ComfyUI is already running ^(PID !LIVE_PID!, verified^).
+        if "!NO_BROWSER!"=="0" start "" "%URL%"
         exit /b 0
     ) else (
-        echo [WARN] Port 8188 is already in use by PID !LIVE_PID!, but it is NOT ComfyUI.
+        echo [WARN] Port %PORT% is already in use by PID !LIVE_PID!, but it is NOT ComfyUI.
         echo Not touching it. Close whatever that is before launching.
         pause
         exit /b 1
     )
 )
 
-:: --- Step 1: locate a Python interpreter (AMD bundle optional) ---
-if not exist "%VENV_PY%" (
-    echo [WARN] AMD venv python not found - looking for a system python...
-    set "VENV_PY="
-    for /f "delims=" %%P in ('where python 2^>nul') do (
-        if not defined VENV_PY set "VENV_PY=%%P"
-    )
-)
-if not defined VENV_PY (
-    echo [FATAL] No Python found ^(neither AMD AI Bundle venv nor system python^). Aborting.
-    pause
-    exit /b 1
-)
-echo Found python: %VENV_PY%
-
-:: --- Step 2: verify it runs ---
-"%VENV_PY%" --version >nul 2>&1
-if errorlevel 1 (
-    echo [FATAL] python.exe found but failed to execute. Aborting.
-    pause
-    exit /b 1
-)
-for /f "tokens=*" %%V in ('"%VENV_PY%" --version 2^>^&1') do set "PYVER=%%V"
-echo Verified: %PYVER%
-
-:: --- Step 3: confirm ComfyUI app exists ---
-if not exist "%COMFY_APP%\main.py" (
-    echo [FATAL] main.py not found at %COMFY_APP%\main.py
+if not exist "%COMFYUI_APP%\main.py" (
+    echo [FATAL] main.py not found at "%COMFYUI_APP%\main.py"
     pause
     exit /b 1
 )
 
-:: --- Step 4: AMD-specific dependency check (ROCm torchvision, skip for non-AMD) ---
-:: NOTE: PyPI's generic torchvision does NOT match AMD's custom ROCm torch build
-:: and will crash with "operator torchvision::nms does not exist".
-:: Must install the matching version from AMD's own ROCm wheel index.
-:: Check the installed version FIRST so a normal launch never touches the network.
-set "NEED_TORCHVISION=0.27.0+rocm7.14.0"
-if exist "%VENV_PYW%" (
-    echo Checking torchvision (ROCm-matched build) ...
-    "%VENV_PY%" -c "import torchvision;print(torchvision.__version__)" 2>nul | findstr /C:"%NEED_TORCHVISION%" >nul
-    if not errorlevel 1 (
-        echo Dependency OK: torchvision %NEED_TORCHVISION% already installed - skipping install.
-    ) else (
-        echo torchvision %NEED_TORCHVISION% not found. Installing ROCm-matched build ...
-        "%VENV_PY%" -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ "torchvision[device-all]==%NEED_TORCHVISION%"
-        if errorlevel 1 (
-            echo [FATAL] pip install torchvision ^(ROCm build^) failed. See output above.
-            pause
-            exit /b 1
-        )
-    )
-) else (
-    echo Non-AMD Python detected - skipping AMD-specific dependency check.
-)
+call :ENSURE_PYTHON
+if errorlevel 1 exit /b 1
+call :ENSURE_DEPS
+if errorlevel 1 exit /b 1
 
-:: --- Step 5: launch via PowerShell (writes the PID to a file, then read it back) ---
-:: NOTE: do NOT capture the PID via `for /f` around powershell - the launched
-:: pythonw.exe inherits the pipe's write-end and never closes it, so the loop
-:: hangs forever even though ComfyUI is already up and serving.
-set "RUN_PY=%VENV_PY%"
-if exist "%VENV_PYW%" set "RUN_PY=%VENV_PYW%"
+:: --- launch ---
+set "RUN_PY=%PY_BIN%"
+if exist "%PYW_BIN%" set "RUN_PY=%PYW_BIN%"
 
 echo Launching ComfyUI in background...
 del "%LOGFILE%" >nul 2>&1
 del "%ERRFILE%" >nul 2>&1
-set "PIDFILE=%COMFY_ROOT%\_launchpid.txt"
+set "PIDFILE=%VENV_DIR%\.launchpid"
 del "%PIDFILE%" >nul 2>&1
 
-powershell -NoProfile -Command "(Start-Process -FilePath '%RUN_PY%' -ArgumentList 'main.py' -WorkingDirectory '%COMFY_APP%' -WindowStyle Hidden -PassThru -RedirectStandardOutput '%LOGFILE%' -RedirectStandardError '%ERRFILE%').Id | Set-Content -Encoding Ascii -Path '%PIDFILE%'"
+powershell -NoProfile -Command "(Start-Process -FilePath '%RUN_PY%' -ArgumentList 'main.py' -WorkingDirectory '%COMFYUI_APP%' -WindowStyle Hidden -PassThru -RedirectStandardOutput '%LOGFILE%' -RedirectStandardError '%ERRFILE%').Id | Set-Content -Encoding Ascii -Path '%PIDFILE%'"
 
 set "NEWPID="
 if exist "%PIDFILE%" set /p NEWPID=<"%PIDFILE%"
@@ -122,10 +120,10 @@ if not defined NEWPID (
     pause
     exit /b 1
 )
-echo Started with PID !NEWPID! ^(this PID is only used to monitor THIS startup - never persisted^).
+echo Started with PID !NEWPID! ^(only used to monitor THIS startup^).
 
-:: --- Step 5b: write a tiny health-check script (prints 200 when ready, else ERROR) ---
-set "HEALTHCHECK_PY=%COMFY_ROOT%\_healthcheck.py"
+:: --- health check ---
+set "HEALTHCHECK_PY=%VENV_DIR%\_healthcheck.py"
 > "%HEALTHCHECK_PY%" (
     echo import sys, urllib.request
     echo url = sys.argv[1]
@@ -138,7 +136,6 @@ set "HEALTHCHECK_PY=%COMFY_ROOT%\_healthcheck.py"
     echo     sys.exit^(1^)
 )
 
-:: --- Step 6: monitor - poll for readiness AND verify the process is still alive ---
 echo Waiting for ComfyUI to become ready...
 set /a TRIES=0
 :POLL
@@ -154,8 +151,8 @@ if errorlevel 1 (
 )
 
 set /a TRIES+=1
-set "HC_OUT=%COMFY_ROOT%\_healthcheck_out.txt"
-"%VENV_PY%" "%HEALTHCHECK_PY%" "%URL%" > "%HC_OUT%" 2>nul
+set "HC_OUT=%VENV_DIR%\_healthcheck_out.txt"
+"%PY_BIN%" "%HEALTHCHECK_PY%" "%URL%" > "%HC_OUT%" 2>nul
 set "HTTPCODE="
 set /p HTTPCODE=<"%HC_OUT%"
 if "!HTTPCODE!"=="200" goto :READY
@@ -173,16 +170,50 @@ goto :POLL
 
 :READY
 del "%HEALTHCHECK_PY%" >nul 2>&1
-del "%COMFY_ROOT%\_healthcheck_out.txt" >nul 2>&1
-echo ComfyUI is up and responding. Opening browser...
-start "" "%URL%"
+del "%VENV_DIR%\_healthcheck_out.txt" >nul 2>&1
+echo ComfyUI is up and responding.
+if "!NO_BROWSER!"=="0" start "" "%URL%"
 exit /b 0
 
+:: ============================================================
+:: INSTALL (bootstrap only, do not launch)
+:: ============================================================
+:INSTALL
+if not exist "%COMFYUI_APP%\main.py" (
+    echo [FATAL] main.py not found at "%COMFYUI_APP%\main.py"
+    pause
+    exit /b 1
+)
+call :ENSURE_PYTHON
+if errorlevel 1 exit /b 1
+call :ENSURE_DEPS
+if errorlevel 1 exit /b 1
+echo Bootstrap complete. Launch with: comfyui-launcher.cmd
+exit /b 0
+
+:: ============================================================
+:: STATUS
+:: ============================================================
+:STATUS
+call :FIND_PORT_OWNER LIVE_PID
+if defined LIVE_PID (
+    call :VERIFY_IS_COMFYUI "!LIVE_PID!" VERIFIED
+    if "!VERIFIED!"=="1" (
+        echo ComfyUI is running ^(PID !LIVE_PID!^).
+        exit /b 0
+    )
+)
+echo ComfyUI is not running.
+exit /b 1
+
+:: ============================================================
+:: STOP
+:: ============================================================
 :STOP
 echo Stopping ComfyUI...
 call :FIND_PORT_OWNER LIVE_PID
 if not defined LIVE_PID (
-    echo Nothing is listening on port 8188. Nothing to stop.
+    echo Nothing is listening on port %PORT%. Nothing to stop.
     exit /b 0
 )
 call :VERIFY_IS_COMFYUI "!LIVE_PID!" VERIFIED
@@ -190,49 +221,146 @@ if "!VERIFIED!"=="1" (
     taskkill /PID !LIVE_PID! /F >nul 2>&1
     echo Stopped PID !LIVE_PID! ^(verified ComfyUI^).
 ) else (
-    echo [WARN] PID !LIVE_PID! is on port 8188 but is NOT ComfyUI. Not touching it.
+    echo [WARN] PID !LIVE_PID! is on port %PORT% but is NOT ComfyUI. Not touching it.
 )
 exit /b 0
 
 :: ============================================================
-:: Subroutine: FIND_PORT_OWNER <result_var>
-:: Finds the PID currently LISTENING on port 8188, if any.
-:: This IS the source of truth - no file, always live OS state.
+:: USAGE
+:: ============================================================
+:USAGE
+echo Usage:
+echo   comfyui-launcher.cmd              start (or reuse) ComfyUI
+echo   comfyui-launcher.cmd install      bootstrap venv + deps only
+echo   comfyui-launcher.cmd stop         stop a running instance
+echo   comfyui-launcher.cmd status       print running state
+echo   comfyui-launcher.cmd --no-browser start without opening the browser
+exit /b 0
+
+:: ============================================================
+:: Subroutine: ENSURE_PYTHON
+:: ============================================================
+:ENSURE_PYTHON
+if exist "%PY_BIN%" (
+    "%PY_BIN%" -m pip --version >nul 2>&1
+    if not errorlevel 1 (
+        echo Using venv python: %PY_BIN%
+        exit /b 0
+    )
+    echo [WARN] venv broken ^(pip missing^) - recreating...
+    rmdir /s /q "%VENV_DIR%" >nul 2>&1
+)
+echo No venv found - creating one...
+set "SYSPY="
+for /f "delims=" %%P in ('where python 2^>nul') do if not defined SYSPY set "SYSPY=%%P"
+if not defined SYSPY (
+    echo [FATAL] No Python found. Install Python 3 first.
+    pause
+    exit /b 1
+)
+echo Creating venv at "%VENV_DIR%" using "%SYSPY%" ...
+"%SYSPY%" -m venv "%VENV_DIR%"
+if not exist "%PY_BIN%" (
+    echo [FATAL] venv creation failed.
+    pause
+    exit /b 1
+)
+"%PY_BIN%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [FATAL] venv created but pip is missing. Reinstall Python with venv support.
+    pause
+    exit /b 1
+)
+echo Created venv: %VENV_DIR%
+exit /b 0
+
+:: ============================================================
+:: Subroutine: ENSURE_DEPS
+:: ============================================================
+:ENSURE_DEPS
+if not exist "%REQUIREMENTS%" (
+    echo [FATAL] requirements.txt not found at "%REQUIREMENTS%"
+    pause
+    exit /b 1
+)
+
+:: AMD ROCm torch stack
+set "ISAMD=0"
+if exist "%AMD_VENV%\Scripts\python.exe" set "ISAMD=1"
+set "TORCH_HIP=0"
+"%PY_BIN%" -c "import torch; import sys; sys.exit(0 if torch.version.hip else 1)" >nul 2>&1
+if not errorlevel 1 (
+    set "TORCH_HIP=1"
+    set "ISAMD=1"
+)
+
+if "!ISAMD!"=="1" (
+    if "!TORCH_HIP!"=="1" (
+        echo ROCm torch already installed - skipping torch stack.
+    ) else (
+        echo Installing torch stack from AMD ROCm index ...
+        "%PY_BIN%" -m pip install --index-url "%AMD_INDEX%" torch torchvision torchaudio
+        if errorlevel 1 (
+            echo [FATAL] Failed to install ROCm torch stack.
+            pause
+            exit /b 1
+        )
+    )
+)
+
+:: sentinel hash of requirements.txt
+set "COMFY_REQ=%REQUIREMENTS%"
+set "STAMP="
+for /f "delims=" %%H in ('"%PY_BIN%" -c "import hashlib,os;print(hashlib.sha256(open(os.environ['COMFY_REQ'],'rb').read()).hexdigest())" 2^>nul') do set "STAMP=%%H"
+
+if exist "%SENTINEL%" (
+    set /p OLDSTAMP=<"%SENTINEL%"
+    if "!OLDSTAMP!"=="!STAMP!" (
+        echo Dependencies up to date - skipping install.
+        exit /b 0
+    )
+)
+
+echo Installing requirements ...
+"%PY_BIN%" -m pip install -r "%REQUIREMENTS%"
+if errorlevel 1 (
+    echo [FATAL] Failed to install requirements.
+    pause
+    exit /b 1
+)
+if defined STAMP (
+    > "%SENTINEL%" echo !STAMP!
+)
+echo Dependencies installed.
+exit /b 0
+
+:: ============================================================
+:: Subroutine: FIND_PORT_OWNER
 :: ============================================================
 :FIND_PORT_OWNER
 set "%~1="
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8188" ^| findstr "LISTENING"') do (
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
     set "%~1=%%a"
 )
 exit /b 0
 
 :: ============================================================
-:: Subroutine: VERIFY_IS_COMFYUI <pid> <result_var>
-:: Confirms a PID is alive AND its command line points at our
-:: ComfyUI main.py - never trust a bare PID number alone.
-:: Sets result_var to 1 if verified, 0 otherwise.
+:: Subroutine: VERIFY_IS_COMFYUI
 :: ============================================================
 :VERIFY_IS_COMFYUI
 setlocal
 set "CHECK_PID=%~1"
 set "RESULT=0"
-
 tasklist /FI "PID eq %CHECK_PID%" 2>nul | find "%CHECK_PID%" >nul
 if errorlevel 1 (
     endlocal & set "%~2=0" & exit /b 0
 )
-
 set "CMDFILE=%TEMP%\_comfy_cmdline_%CHECK_PID%.txt"
 powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=%CHECK_PID%\").CommandLine" > "%CMDFILE%" 2>nul
 set "CMDLINE="
 set /p CMDLINE=<"%CMDFILE%"
 del "%CMDFILE%" >nul 2>&1
-
 echo !CMDLINE! | findstr /I "main.py" >nul
-if not errorlevel 1 (
-    echo !CMDLINE! | findstr /I "ComfyUI" >nul
-    if not errorlevel 1 set "RESULT=1"
-)
-
+if not errorlevel 1 set "RESULT=1"
 endlocal & set "%~2=%RESULT%"
 exit /b 0
